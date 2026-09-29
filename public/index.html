@@ -98,11 +98,11 @@
       <button class="cta" id="go" onclick="create()">Create</button>
     </div>
     <p class="err" id="err"></p>
-    <p class="hint">Anyone with a canvas's link can read and add to it. Credit is optional everywhere — post quietly or put your name on it.</p>
+    <p class="hint">Every canvas lives in the directory below — the whole team can see and add to all of them. Credit is optional everywhere — post quietly or put your name on it.</p>
   </div>
 
   <div class="recents" id="recents" style="display:none">
-    <p class="label">Your canvases</p>
+    <p class="label">All canvases</p>
     <div id="recents-list"></div>
   </div>
 </div>
@@ -119,18 +119,19 @@ const ago = ts => {
   return new Date(ts).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 };
 
-function recents(){
-  try{ return JSON.parse(localStorage.getItem('exp:recents')||'[]'); }catch(e){ return []; }
+async function loadDirectory(){
+  try{
+    const r = await fetch('/api/canvases');
+    if(!r.ok) return;
+    const all = (await r.json()).canvases || [];
+    if(!all.length) return;
+    document.getElementById('recents').style.display='block';
+    document.getElementById('recents-list').innerHTML = all.map(c =>
+      `<a href="/c/${esc(c.slug)}"><b>${esc(c.name)}</b><span class="meta">${c.designs} designs · ${c.ideas} ideas · active ${ago(c.updated)}</span><span class="arrow">→</span></a>`
+    ).join('');
+  }catch(e){}
 }
-function renderRecents(){
-  const list = recents();
-  if(!list.length) return;
-  document.getElementById('recents').style.display='block';
-  document.getElementById('recents-list').innerHTML = list.map(r =>
-    `<a href="/c/${esc(r.slug)}"><b>${esc(r.name)}</b><span class="meta">opened ${ago(r.ts)}</span><span class="arrow">→</span></a>`
-  ).join('');
-}
-renderRecents();
+loadDirectory();
 
 let busy = false;
 async function create(){

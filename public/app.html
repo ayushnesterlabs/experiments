@@ -442,7 +442,7 @@
 <body>
 
 <header>
-  <button class="side-toggle" id="side-toggle" onclick="app.toggleSide()" aria-label="Your canvases">
+  <button class="side-toggle" id="side-toggle" onclick="app.toggleSide()" aria-label="All canvases">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
   </button>
   <div class="brand"><a id="brand-home"><h1>Experiments</h1></a><span id="brand-sub">Nester</span></div>
@@ -468,9 +468,9 @@
 
 <div class="scrim" id="scrim" onclick="app.closeDrawer();app.closeSide()"></div>
 
-<aside class="side" id="side" role="dialog" aria-label="Your canvases">
+<aside class="side" id="side" role="dialog" aria-label="All canvases">
   <div class="side-bar">
-    <span class="label">Your canvases</span>
+    <span class="label">All canvases</span>
     <button class="drawer-x" onclick="app.closeSide()" aria-label="Close">✕</button>
   </div>
   <div class="side-body" id="side-list" data-lenis-prevent></div>
@@ -1324,30 +1324,22 @@ const app = (() => {
     $('side').classList.remove('show');
     if(!$('drawer').classList.contains('show')) $('scrim').classList.remove('show');
   }
-  function renderSide(){
-    let recents = [];
-    try{ recents = JSON.parse(localStorage.getItem('exp:recents')||'[]'); }catch(e){}
+  async function renderSide(){
     const list = $('side-list');
-    if(!recents.length){
-      list.innerHTML = `<p style="padding:10px 14px;font-size:12px;color:var(--g4)">Canvases you open show up here.</p>`;
-      return;
+    list.innerHTML = `<p style="padding:10px 14px;font-size:12px;color:var(--g4)">Loading…</p>`;
+    try{
+      const r = await fetch('/api/canvases');
+      if(!r.ok) throw 0;
+      const all = (await r.json()).canvases || [];
+      list.innerHTML = all.map(c=>`
+        <a class="side-item ${c.slug===store.slug?'on':''}" href="/c/${esc(c.slug)}">
+          <b>${esc(c.name)}</b>
+          <span class="side-meta">${c.designs} designs · ${c.ideas} ideas · ${ago(c.updated)}</span>
+        </a>`).join('')
+        || `<p style="padding:10px 14px;font-size:12px;color:var(--g4)">No canvases yet.</p>`;
+    }catch(e){
+      list.innerHTML = `<p style="padding:10px 14px;font-size:12px;color:var(--g4)">Couldn't load the directory.</p>`;
     }
-    list.innerHTML = recents.map(r=>`
-      <a class="side-item ${r.slug===store.slug?'on':''}" href="/c/${esc(r.slug)}">
-        <b>${esc(r.name)}</b>
-        <span class="side-meta" data-slug="${esc(r.slug)}">…</span>
-      </a>`).join('');
-    /* fill live counts lazily */
-    recents.forEach(async r=>{
-      try{
-        const res = await fetch(`/api/canvases/${r.slug}`);
-        const el = list.querySelector(`[data-slug="${CSS.escape(r.slug)}"]`);
-        if(!el) return;
-        if(!res.ok){ el.textContent = 'gone'; return; }
-        const m = await res.json();
-        el.textContent = `${m.designs} designs · ${m.ideas} ideas`;
-      }catch(e){}
-    });
   }
   async function createCanvas(){
     if(busy) return;
@@ -1359,15 +1351,6 @@ const app = (() => {
       if(r.ok){ const c = await r.json(); location.href = '/c/'+c.slug; }
     } finally { busy = false; }
   }
-  function rememberCanvas(meta){
-    try{
-      let r = JSON.parse(localStorage.getItem('exp:recents')||'[]');
-      r = r.filter(x=>x.slug!==meta.slug);
-      r.unshift({slug:meta.slug, name:meta.name, ts:Date.now()});
-      localStorage.setItem('exp:recents', JSON.stringify(r.slice(0,12)));
-    }catch(e){}
-  }
-
   /* ---------- boot ---------- */
   (async function boot(){
     if(store.mode==='server'){
@@ -1383,7 +1366,6 @@ const app = (() => {
       $('brand-home').href = '/';
       $('share-btn').style.display = '';
       $('side-toggle').style.display = 'flex';
-      rememberCanvas(meta);
       NAMES = (await store.get('meta:team')) || [];
       liveSync();
     } else {

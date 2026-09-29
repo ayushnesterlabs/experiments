@@ -33,6 +33,10 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT) || 4321;
+/* Optional site-wide passphrase. Set TEAM_KEY to lock the whole site behind
+   one shared key (entered once per browser, stored as a cookie). Unset = open. */
+const TEAM_KEY = process.env.TEAM_KEY || '';
+const KEY_HASH = TEAM_KEY ? crypto.createHash('sha256').update(TEAM_KEY).digest('hex') : null;
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
@@ -62,7 +66,22 @@ const q = {
                          ON CONFLICT(canvas, key) DO UPDATE SET value=excluded.value, updated=excluded.updated`),
   counts:    db.prepare(`SELECT substr(key, 1, instr(key, ':') - 1) AS kind, COUNT(*) AS n
                          FROM kv WHERE canvas = ? AND key NOT LIKE 'meta:%' GROUP BY kind`),
+  directory: db.prepare(`SELECT c.slug, c.name, c.created,
+                           COALESCE(SUM(CASE WHEN k.key LIKE 'design:%' THEN 1 ELSE 0 END), 0) AS designs,
+                           COALESCE(SUM(CASE WHEN k.key LIKE 'idea:%' THEN 1 ELSE 0 END), 0) AS ideas,
+                           COALESCE(MAX(k.updated), c.created) AS updated
+                         FROM canvases c LEFT JOIN kv k ON k.canvas = c.slug
+                         GROUP BY c.slug ORDER BY updated DESC`),
 };
+
+/* ---------- passphrase gate ---------- */
+function authed(req) {
+  if (!KEY_HASH) return true;
+  const m = (req.headers.cookie || '').match(/(?:^|;\s*)expkey=([a-f0-9]{64})/);
+  if (!m) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(m[1]), Buffer.from(KEY_HASH)); }
+  catch { return false; }
+}
 
 /* ---------- op application (mirror of the client fallback) ---------- */
 function applyOp(obj, op) {
@@ -151,6 +170,28 @@ async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
 
+  /* unlock (the only route reachable while locked) */
+  if (p === '/api/unlock' && req.method === 'POST') {
+    if (!KEY_HASH) return json(res, 200, { ok: true });
+    const body = await readBody(req);
+    const got = crypto.createHash('sha256').update(String(body.key || '')).digest('hex');
+    let ok = false;
+    try { ok = crypto.timingSafeEqual(Buffer.from(got), Buffer.from(KEY_HASH)); } catch {}
+    if (!ok) return json(res, 403, { error: 'wrong key' });
+    const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie': `expkey=${KEY_HASH}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${secure}`,
+    });
+    return res.end('{"ok":true}');
+  }
+
+  /* everything else requires the key when TEAM_KEY is set */
+  if (!authed(req)) {
+    if (p.startsWith('/api/')) return json(res, 401, { error: 'locked' });
+    return page(res, 'unlock.html');
+  }
+
   /* pages */
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) return page(res, 'index.html');
   const pageMatch = p.match(/^\/c\/([a-z0-9-]+)\/?$/);
@@ -158,6 +199,9 @@ async function handle(req, res) {
   if (req.method === 'GET' && p === '/favicon.ico') { res.writeHead(204); return res.end(); }
 
   /* canvas registry */
+  if (p === '/api/canvases' && req.method === 'GET') {
+    return json(res, 200, { canvases: q.directory.all() });
+  }
   if (p === '/api/canvases' && req.method === 'POST') {
     const body = await readBody(req);
     const name = String(body.name || '').trim().slice(0, 60);

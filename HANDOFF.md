@@ -35,6 +35,9 @@ Limits: keys validated against `^(design|idea|meta):`, values ≤4.5MB (images a
 ## Realtime sync (SSE)
 `GET /api/c/:slug/events` is a Server-Sent Events stream (25s heartbeat). Every successful write broadcasts `{key, src}` to that canvas's subscribers. The client (server mode only) subscribes on boot, ignores events carrying its own per-tab `src` id, refetches just the changed key and merges it into state. Re-renders are **deferred while the user is mid-composition, mid-drag, or in the drawer** (`dirty` flag) and flushed the moment they're done — verified with two live tabs: posts and pile-ons appear in the other tab in <1s, and an open composer is never clobbered by incoming changes. On stream reconnect the client re-pulls everything. Note: SSE needs a long-running process — deploy to a persistent host (Railway/Fly/VPS), not serverless.
 
+## Directory + team key
+The landing page and the ☰ sidebar list **all canvases** (`GET /api/canvases` — name, design/idea counts, last activity, sorted by activity). The trust boundary is the site itself: set the **`TEAM_KEY`** env var and every page/API requires the shared passphrase once per browser (sha256 cookie, 1yr, HttpOnly; timing-safe compares; `Secure` flag added behind HTTPS proxies). Unset `TEAM_KEY` = fully open (local dev). Unlock page: `public/unlock.html`. On Railway: add `TEAM_KEY` in service → Variables.
+
 ## Credits (per canvas now)
 The hardcoded `TEAM` array is gone from the server path. Credit is an input + datalist: type any name or pick a known one. The pool = `meta:team` key (seeded `[]` on canvas creation, grows when someone posts under a new name) ∪ every author already on the wall. `DEFAULT_TEAM` in app.html only seeds artifact/demo modes. Credit is still optional everywhere — "No credit — post it quietly" is the placeholder.
 
@@ -44,7 +47,7 @@ The hardcoded `TEAM` array is gone from the server path. Credit is an input + da
 - `meta:team` → `["name", …]` per canvas
 
 ## Known limits (deliberate for v1)
-- **The link is the auth.** Anyone with a canvas URL can read/write it. Fine for teams; revisit before anything public.
+- **One shared key, not accounts.** Everyone inside the key sees and can edit everything; there are no per-canvas permissions. Rotating the key = changing the env var (everyone re-enters once).
 - **No delete, no moderation** — by design, same open-access ethos as v0. Revisit only if abused.
 - **`localStorage` recents** on the landing page are per-browser, not synced.
 - **Canvas drag on touch** still competes with scroll; desktop-first.
