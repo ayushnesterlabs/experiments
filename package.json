@@ -1,0 +1,12 @@
+{
+  "name": "experiments",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Experiments — multi-canvas boards for unshipped designs and half-thoughts. Zero dependencies.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
