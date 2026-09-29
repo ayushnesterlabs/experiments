@@ -455,7 +455,7 @@
   <button class="cta" id="main-cta" onclick="app.primary()">Upload</button>
 </header>
 
-<div class="banner" id="banner">Demo mode — nothing saves. Run <b>node server.js</b> and open a canvas, or publish as a Claude artifact (shared storage).</div>
+<div class="banner" id="banner">Demo mode — nothing saves. Fill in <b>fb-config.js</b> and open a canvas from the directory.</div>
 
 <datalist id="names-dl"></datalist>
 
@@ -495,22 +495,39 @@
   <div class="drawer-foot" id="drawer-foot"></div>
 </aside>
 
-<script>
+<script src="/fb-config.js"></script>
+<script type="module">
 /* =========================================================
-   NAMES — the credit pool. Per-canvas on the server (meta:team
-   key + every author already on the wall); the DEFAULT_TEAM
-   array only seeds artifact/demo modes.
+   NAMES — the credit pool. Per-canvas (meta:team item + every
+   author already on the wall); DEFAULT_TEAM seeds demo mode.
 ========================================================= */
 const DEFAULT_TEAM = ['Ankur','Kunal','Pooja','Abhishek','Sneha','Shrey','Abhijit','Ayush','John','Aftab','Hemanshi','Ananya','Rohan'];
 let NAMES = [];
 
 /* =========================================================
-   STORE ADAPTER — same list/get/set contract as v0, plus
-   mutate() for concurrency-safe partial writes.
-   1. /c/<slug> URL → the Experiments server (multi-canvas).
-   2. Published Claude artifact → window.storage shared=true.
-   3. Bare file → in-memory demo mode.
-   Keys: design:<id>, idea:<id>, meta:team.
+   FIREBASE BOOTSTRAP — dynamic imports so the bare file
+   (demo mode) never touches the network for the SDK.
+========================================================= */
+const SLUG = (location.pathname.match(/^\/c\/([a-z0-9-]+)/) || [])[1] || null;
+let fb = null;
+if (window.FIREBASE_CONFIG) {
+  try{
+    const V = '10.14.1';
+    const G = n => import(`https://www.gstatic.com/firebasejs/${V}/firebase-${n}.js`);
+    const [A, F, AU, S] = await Promise.all([G('app'), G('firestore'), G('auth'), G('storage')]);
+    const app0 = A.initializeApp(window.FIREBASE_CONFIG);
+    fb = { F, AU, S, db: F.getFirestore(app0), auth: AU.getAuth(app0), storage: S.getStorage(app0) };
+  }catch(e){ console.error('Firebase failed to load, falling back to demo mode', e); }
+}
+
+/* =========================================================
+   STORE ADAPTER — same contract as before (list/get/set/mutate
+   + canvas meta/directory), now backed by Firestore:
+   - canvases/{slug}                     directory doc (name, counters, updated)
+   - canvases/{slug}/items/{key}         {json, ts} — design:<id>, idea:<id>, meta:team
+   - Storage: canvases/{slug}/img/*      uploaded images (URLs in the JSON)
+   mutate() runs in a Firestore transaction → concurrent pile-ons stay safe.
+   Realtime comes from onSnapshot over the items collection.
 ========================================================= */
 function applyOp(obj, op){
   if(op.type==='appendCard'){ obj.cards=obj.cards||[]; obj.cards.push(op.card); obj.updated=Date.now(); }
@@ -529,54 +546,99 @@ function applyOp(obj, op){
   return obj;
 }
 const store = (() => {
-  const slugMatch = location.pathname.match(/^\/c\/([a-z0-9-]+)/);
-  const slug = slugMatch ? slugMatch[1] : null;
-  const artifact = !slug && (typeof window !== 'undefined') && window.storage && typeof window.storage.get === 'function';
-  const mode = slug ? 'server' : artifact ? 'artifact' : 'demo';
-  /* per-tab id: lets this tab ignore its own writes echoed back on the live stream */
-  const src = Math.random().toString(36).slice(2, 10);
-  const api = p => `/api/c/${slug}/` + p;
+  const mode = fb ? 'firebase' : 'demo';
   const mem = new Map();
+  const canvasDoc = () => fb.F.doc(fb.db, 'canvases', SLUG);
+  const itemsCol  = () => fb.F.collection(fb.db, 'canvases', SLUG, 'items');
+  const itemDoc   = k  => fb.F.doc(fb.db, 'canvases', SLUG, 'items', k);
+  const counterOf = k => k.startsWith('design:') ? 'designs' : k.startsWith('idea:') ? 'ideas' : null;
   return {
-    mode, slug, src,
+    mode, slug: SLUG,
     remote: mode !== 'demo',
-    async canvasMeta(){
-      if(mode!=='server') return null;
-      try{ const r = await fetch(`/api/canvases/${slug}`); return r.ok ? await r.json() : null; }catch(e){ return null; }
+    /* resolves to the signed-in user, or null → caller redirects to /unlock.html */
+    ensureAuth(){
+      if(mode!=='firebase') return Promise.resolve(true);
+      return new Promise(res => { const off = fb.AU.onAuthStateChanged(fb.auth, u => { off(); res(u); }); });
     },
-    async list(prefix){
-      if(mode==='server'){ try{ const r = await fetch(api('keys')+`?prefix=${encodeURIComponent(prefix)}`); return r.ok ? (await r.json()).keys : []; }catch(e){ return []; } }
-      if(mode==='artifact'){ try{ const r = await window.storage.list(prefix, true); return r?.keys || []; }catch(e){ return []; } }
-      return [...mem.keys()].filter(k => k.startsWith(prefix));
+    async canvasMeta(){
+      if(mode!=='firebase' || !SLUG) return null;
+      try{ const s = await fb.F.getDoc(canvasDoc()); return s.exists() ? {slug:SLUG, ...s.data()} : null; }catch(e){ return null; }
+    },
+    async directory(){
+      if(mode!=='firebase') return [];
+      const qs = await fb.F.getDocs(fb.F.query(fb.F.collection(fb.db,'canvases'), fb.F.orderBy('updated','desc')));
+      return qs.docs.map(d => ({slug:d.id, ...d.data()}));
+    },
+    async createCanvas(name){
+      const base = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'canvas';
+      const slug = base + '-' + Math.random().toString(36).slice(2,8);
+      await fb.F.setDoc(fb.F.doc(fb.db,'canvases',slug), {name, created:Date.now(), updated:Date.now(), designs:0, ideas:0});
+      return {slug, name};
+    },
+    /* one round-trip for everything on the canvas: [[key, obj], …] */
+    async allItems(){
+      if(mode==='firebase'){
+        const qs = await fb.F.getDocs(itemsCol());
+        return qs.docs.map(d => { try{ return [d.id, JSON.parse(d.data().json)]; }catch(e){ return null; } }).filter(Boolean);
+      }
+      return [...mem.entries()].map(([k,v]) => [k, JSON.parse(v)]);
     },
     async get(key){
-      if(mode==='server'){ try{ const r = await fetch(api('kv')+`?key=${encodeURIComponent(key)}`); return r.ok ? JSON.parse((await r.json()).value) : null; }catch(e){ return null; } }
-      if(mode==='artifact'){ try{ const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : null; }catch(e){ return null; } }
+      if(mode==='firebase'){
+        try{ const s = await fb.F.getDoc(itemDoc(key)); return s.exists() ? JSON.parse(s.data().json) : null; }catch(e){ return null; }
+      }
       return mem.has(key) ? JSON.parse(mem.get(key)) : null;
     },
     async set(key, obj){
-      if(mode==='server'){
+      if(mode==='firebase'){
         try{
-          const r = await fetch(api('kv')+`?src=${src}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key, value:JSON.stringify(obj)})});
-          return r.ok;
+          const batch = fb.F.writeBatch(fb.db);
+          batch.set(itemDoc(key), {json: JSON.stringify(obj), ts: Date.now()});
+          const c = counterOf(key);
+          batch.update(canvasDoc(), c ? {updated: Date.now(), [c]: fb.F.increment(1)} : {updated: Date.now()});
+          await batch.commit();
+          return true;
         }catch(e){ console.error(e); return false; }
       }
-      if(mode==='artifact'){ try{ await window.storage.set(key, JSON.stringify(obj), true); return true; }catch(e){ console.error(e); return false; } }
       mem.set(key, JSON.stringify(obj)); return true;
     },
-    /* Partial write. On the server this is one atomic transaction, so two
-       people piling on the same idea at once can't clobber each other.
-       Other modes fall back to read-modify-write. */
+    /* Partial write inside a Firestore transaction — two people piling on
+       the same idea at the same moment can't clobber each other. */
     async mutate(key, op){
-      if(mode==='server'){
+      if(mode==='firebase'){
         try{
-          const r = await fetch(api('mutate')+`?src=${src}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key, op})});
-          return r.ok;
+          await fb.F.runTransaction(fb.db, async tx => {
+            const s = await tx.get(itemDoc(key));
+            if(!s.exists()) throw new Error('missing '+key);
+            const obj = applyOp(JSON.parse(s.data().json), op);
+            tx.set(itemDoc(key), {json: JSON.stringify(obj), ts: Date.now()});
+            tx.update(canvasDoc(), {updated: Date.now()});
+          });
+          return true;
         }catch(e){ console.error(e); return false; }
       }
       const obj = await this.get(key);
       if(!obj) return false;
       return this.set(key, applyOp(obj, op));
+    },
+    /* dataURL → Storage URL (demo mode keeps the dataURL as-is) */
+    async uploadImage(dataUrl){
+      if(mode!=='firebase') return dataUrl;
+      const id = Date.now() + '-' + Math.random().toString(36).slice(2,8);
+      const r = fb.S.ref(fb.storage, `canvases/${SLUG}/img/${id}`);
+      await fb.S.uploadString(r, dataUrl, 'data_url');
+      return await fb.S.getDownloadURL(r);
+    },
+    /* live sync: onChange(key, obj) per changed item, onBatch() after each snapshot */
+    subscribe(onChange, onBatch){
+      if(mode!=='firebase' || !SLUG) return;
+      fb.F.onSnapshot(itemsCol(), snap => {
+        snap.docChanges().forEach(ch => {
+          if(ch.type==='removed') return;
+          try{ onChange(ch.doc.id, JSON.parse(ch.doc.data().json)); }catch(e){}
+        });
+        if(onBatch) onBatch();
+      });
     },
     seedDemo(){ demoData().forEach(([k,v]) => mem.set(k, JSON.stringify(v))); }
   };
@@ -671,17 +733,15 @@ const app = (() => {
     if(!a || NAMES.includes(a)) return;
     NAMES.push(a); NAMES.sort((x,y)=>x.localeCompare(y));
     refreshNamesDl();
-    if(store.mode==='server') store.set('meta:team', NAMES);
+    if(store.remote) store.set('meta:team', NAMES);
   }
   const chip = a => a ? `<span class="name-chip">${esc(a)}</span>` : '';
 
   /* ---------- data ---------- */
   async function loadAll(){
-    const [dk, ik] = await Promise.all([store.list('design:'), store.list('idea:')]);
-    const dO = await Promise.all(dk.map(k => store.get(k).then(o => o && {key:k, ...o})));
-    const iO = await Promise.all(ik.map(k => store.get(k).then(o => o && {key:k, ...o})));
-    designs = dO.filter(Boolean).sort((a,b)=>b.ts-a.ts);
-    ideas   = iO.filter(Boolean).sort((a,b)=>a.ts-b.ts);
+    const entries = await store.allItems();
+    designs = entries.filter(([k]) => k.startsWith('design:')).map(([k,o]) => ({key:k, ...o})).sort((a,b)=>b.ts-a.ts);
+    ideas   = entries.filter(([k]) => k.startsWith('idea:')).map(([k,o]) => ({key:k, ...o})).sort((a,b)=>a.ts-b.ts);
     const pool = new Set(NAMES.map(n=>n.trim()).filter(Boolean));
     designs.forEach(d=>{ if(d.author) pool.add(d.author); });
     ideas.forEach(i=>(i.cards||[]).forEach(c=>{ if(c.author) pool.add(c.author); }));
@@ -1078,6 +1138,10 @@ const app = (() => {
     if(!blocks.length){ if(errEl) errEl.textContent='Write something first.'; return; }
     busy = true; const btn=$('ed-save'); if(btn){btn.disabled=true; btn.textContent='Saving…';}
     try{
+      /* new images were kept as dataURLs for preview; ship them to Storage now */
+      for(const b of blocks){
+        if(b.t==='img' && b.c.startsWith('data:')) b.c = await store.uploadImage(b.c);
+      }
       const key = ideas[ctx.ii].key;
       const t = $('ed-title');
       const op = {type:'updateCard', cardId:ctx.cardId, blocks, author};
@@ -1210,7 +1274,8 @@ const app = (() => {
     const author = ($('up-author')?.value)||'';
     let data=null, extra={};
     if(upKind==='image'){ data=pendingImage; if(!data){err.textContent='Add an image first.';return;} }
-    if(upKind==='proto'){ data=($('up-code').value||'').trim(); if(!data){err.textContent='Upload or paste some HTML first.';return;} if(data.length>3.5e6){err.textContent='Too large.';return;} }
+    const protoCap = store.mode==='firebase' ? 9e5 : 3.5e6;
+    if(upKind==='proto'){ data=($('up-code').value||'').trim(); if(!data){err.textContent='Upload or paste some HTML first.';return;} if(data.length>protoCap){err.textContent=`Too large (max ${Math.round(protoCap/1e3)}KB) — host it and share the repo or a link instead.`;return;} }
     if(upKind==='repo'){
       data=($('up-repo').value||'').trim();
       if(!/^https?:\/\//.test(data)){err.textContent='Needs a full repo URL starting with https://';return;}
@@ -1221,6 +1286,7 @@ const app = (() => {
     if(upKind==='link'){ data=($('up-url').value||'').trim(); if(!/^https?:\/\//.test(data)){err.textContent='Needs a full URL starting with https://';return;} }
     busy=true; const b=$('up-save'); b.disabled=true; b.textContent='Uploading…';
     try{
+      if(upKind==='image') data = await store.uploadImage(data);
       await store.set('design:'+uid(), {v:1, kind:upKind, data, ...extra, caption:($('up-cap').value||'').trim(), author, ts:Date.now()});
       noteAuthor(author);
       closeDrawer(); await loadAll(); render();
@@ -1259,7 +1325,7 @@ const app = (() => {
   }
   document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeDrawer(); closeSide(); if(composer||newSpot){ composer=null; newSpot=null; if(view==='ideas') renderIdeas(); } } });
 
-  /* ---------- live sync (SSE) ---------- */
+  /* ---------- live sync (Firestore snapshots) ---------- */
   let dirty = false;
   /* re-render unless the user is mid-composition / mid-drag / in the drawer;
      then it happens as soon as they're done */
@@ -1268,14 +1334,11 @@ const app = (() => {
     render();
   }
   function flushDirty(){ if(dirty){ dirty = false; render(); } }
-  async function applyRemote(key){
+  function mergeItem(key, obj){
     if(key === 'meta:team'){
-      const t = await store.get(key);
-      if(Array.isArray(t)){ NAMES = [...new Set([...NAMES, ...t])].sort((a,b)=>a.localeCompare(b)); refreshNamesDl(); }
+      if(Array.isArray(obj)){ NAMES = [...new Set([...NAMES, ...obj])].sort((a,b)=>a.localeCompare(b)); refreshNamesDl(); }
       return;
     }
-    const obj = await store.get(key);
-    if(!obj) return;
     const item = {key, ...obj};
     if(key.startsWith('design:')){
       const i = designs.findIndex(d=>d.key===key);
@@ -1285,20 +1348,17 @@ const app = (() => {
       const i = ideas.findIndex(d=>d.key===key);
       if(i>=0) ideas[i]=item; else ideas.push(item);
       ideas.sort((a,b)=>a.ts-b.ts);
-    } else return;
-    scheduleRender();
+    }
   }
+  /* first snapshot = initial load (resolves the promise); later ones re-render */
   function liveSync(){
-    const es = new EventSource(`/api/c/${store.slug}/events`);
-    es.onmessage = e => {
-      try{
-        const m = JSON.parse(e.data);
-        if(m.src === store.src) return;   // our own write, already rendered
-        applyRemote(m.key);
-      }catch(err){}
-    };
-    /* EventSource auto-reconnects; on reconnect re-pull everything we may have missed */
-    es.onopen = async () => { await loadAll(); scheduleRender(); };
+    return new Promise(ready => {
+      let first = true;
+      store.subscribe(mergeItem, () => {
+        if(first){ first = false; ready(); }
+        else scheduleRender();
+      });
+    });
   }
 
   /* ---------- share ---------- */
@@ -1328,9 +1388,7 @@ const app = (() => {
     const list = $('side-list');
     list.innerHTML = `<p style="padding:10px 14px;font-size:12px;color:var(--g4)">Loading…</p>`;
     try{
-      const r = await fetch('/api/canvases');
-      if(!r.ok) throw 0;
-      const all = (await r.json()).canvases || [];
+      const all = await store.directory();
       list.innerHTML = all.map(c=>`
         <a class="side-item ${c.slug===store.slug?'on':''}" href="/c/${esc(c.slug)}">
           <b>${esc(c.name)}</b>
@@ -1347,13 +1405,18 @@ const app = (() => {
     if(!name){ $('side-name').focus(); return; }
     busy = true;
     try{
-      const r = await fetch('/api/canvases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
-      if(r.ok){ const c = await r.json(); location.href = '/c/'+c.slug; }
+      const c = await store.createCanvas(name);
+      if(c) location.href = '/c/'+c.slug;
     } finally { busy = false; }
   }
   /* ---------- boot ---------- */
   (async function boot(){
-    if(store.mode==='server'){
+    if(store.mode==='firebase'){
+      /* team-key gate: no auth → the unlock page signs in and sends them back */
+      if(!(await store.ensureAuth())){
+        location.href = '/unlock.html?to=' + encodeURIComponent(location.pathname + location.search);
+        return;
+      }
       const meta = await store.canvasMeta();
       if(!meta){
         $('main').innerHTML = `<div class="empty"><h3>Canvas not found</h3>
@@ -1366,24 +1429,32 @@ const app = (() => {
       $('brand-home').href = '/';
       $('share-btn').style.display = '';
       $('side-toggle').style.display = 'flex';
-      NAMES = (await store.get('meta:team')) || [];
-      liveSync();
+      /* the first snapshot doubles as the initial load; NAMES arrive via meta:team merge */
+      await liveSync();
+      const pool = new Set(NAMES);
+      designs.forEach(d=>{ if(d.author) pool.add(d.author); });
+      ideas.forEach(i=>(i.cards||[]).forEach(c=>{ if(c.author) pool.add(c.author); }));
+      NAMES = [...pool].sort((a,b)=>a.localeCompare(b));
+      refreshNamesDl();
     } else {
       NAMES = [...DEFAULT_TEAM];
-      if(store.mode==='demo'){ store.seedDemo(); $('banner').classList.add('show'); }
+      store.seedDemo(); $('banner').classList.add('show');
+      await loadAll();
     }
-    await loadAll();
     animateEnter();
     render();
   })();
 
   /* Lenis smooth scrolling — progressive: skipped if the CDN is unreachable
-     or the user prefers reduced motion */
-  window.addEventListener('load', ()=>{
-    if(window.Lenis && !matchMedia('(prefers-reduced-motion: reduce)').matches){
+     or the user prefers reduced motion. The module may execute after the load
+     event (dynamic SDK imports), so handle both cases. */
+  function startLenis(){
+    if(window.Lenis && !lenis && !matchMedia('(prefers-reduced-motion: reduce)').matches){
       lenis = new Lenis({autoRaf:true});
     }
-  });
+  }
+  if(document.readyState === 'complete') startLenis();
+  else window.addEventListener('load', startLenis);
 
   return {go, primary, openDesign, openIdeaCard, cardClick, editCard, quickAdd, canvasDbl,
           compKey, compSave, compCancel,
@@ -1391,6 +1462,8 @@ const app = (() => {
           setUpKind, pickImage, pickHtml, previewProto, saveUpload, closeDrawer, shareLink,
           toggleSide, closeSide, createCanvas};
 })();
+/* the script is a module now — inline onclick handlers need the global */
+window.app = app;
 </script>
 </body>
 </html>

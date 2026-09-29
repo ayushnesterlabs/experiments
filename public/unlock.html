@@ -57,20 +57,41 @@
   </div>
   <p class="err" id="err"></p>
 </div>
-<script>
+<script src="/fb-config.js"></script>
+<script type="module">
+const V = '10.14.1';
+const G = n => import(`https://www.gstatic.com/firebasejs/${V}/firebase-${n}.js`);
+let fb = null;
+if(window.FIREBASE_CONFIG){
+  const [A, AU, FN] = await Promise.all([G('app'), G('auth'), G('functions')]);
+  const app0 = A.initializeApp(window.FIREBASE_CONFIG);
+  fb = { AU, auth: AU.getAuth(app0), fns: FN.getFunctions(app0), httpsCallable: FN.httpsCallable };
+  /* already unlocked in this browser? go straight through */
+  const user = await new Promise(r => { const off = AU.onAuthStateChanged(fb.auth, u => { off(); r(u); }); });
+  if(user) location.href = new URLSearchParams(location.search).get('to') || '/';
+}
+
 async function go(){
   const key = document.getElementById('key').value;
   const err = document.getElementById('err');
   if(!key) return;
   try{
-    const r = await fetch('/api/unlock', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key})});
-    if(r.ok){ location.reload(); return; }
-    err.textContent = 'Not it — ask a teammate for the key.';
-  }catch(e){ err.textContent = 'Could not reach the server.'; }
+    if(!fb) throw new Error('no config');
+    const unlock = fb.httpsCallable(fb.fns, 'unlock');
+    const res = await unlock({key});
+    await fb.AU.signInWithCustomToken(fb.auth, res.data.token);
+    location.href = new URLSearchParams(location.search).get('to') || '/';
+    return;
+  }catch(e){
+    err.textContent = (e && e.code === 'functions/permission-denied')
+      ? 'Not it — ask a teammate for the key.'
+      : 'Could not verify the key — try again.';
+  }
   const card = document.getElementById('card');
   card.classList.remove('no'); void card.offsetWidth; card.classList.add('no');
   document.getElementById('key').select();
 }
+window.go = go;
 </script>
 </body>
 </html>

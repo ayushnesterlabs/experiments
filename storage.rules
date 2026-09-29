@@ -1,0 +1,10 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read: if request.auth != null;
+      // images are resized client-side to ≤3.5MB; 4MB is the hard ceiling
+      allow write: if request.auth != null && request.resource.size < 4 * 1024 * 1024;
+    }
+  }
+}
