@@ -125,9 +125,9 @@ let sb = null;
 if(SB_CFG.url && SB_CFG.anonKey){
   const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
   sb = createClient(SB_CFG.url, SB_CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true } });
-  /* team-key gate: no session → bounce to the unlock page */
+  /* open access: reuse the session or mint an anonymous one */
   const { data } = await sb.auth.getSession();
-  if(!data || !data.session){ location.href = '/unlock.html?to=%2F'; }
+  if(!data || !data.session){ await sb.auth.signInAnonymously(); }
 }
 
 async function loadDirectory(){

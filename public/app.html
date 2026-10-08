@@ -562,11 +562,16 @@ const store = (() => {
   return {
     mode, slug: SLUG,
     remote: mode !== 'demo',
-    /* resolves to the signed-in user, or null → caller redirects to /unlock.html */
+    /* open access: reuse the browser's session or mint an anonymous one.
+       Anonymous users still get the `authenticated` role, so RLS passes.
+       Returns the user, or null if anonymous sign-in is disabled/unreachable. */
     async ensureAuth(){
       if(mode!=='supabase') return true;
       const { data } = await sb.auth.getSession();
-      return data && data.session ? data.session.user : null;
+      if(data && data.session) return data.session.user;
+      const { data: anon, error } = await sb.auth.signInAnonymously();
+      if(error){ console.error(error); return null; }
+      return anon.user;
     },
     async canvasMeta(){
       if(mode!=='supabase' || !SLUG) return null;
@@ -1444,9 +1449,11 @@ const app = (() => {
   /* ---------- boot ---------- */
   (async function boot(){
     if(store.remote){
-      /* team-key gate: no auth → the unlock page signs in and sends them back */
+      /* open access — mint an anonymous session; only fails if the project
+         has Anonymous sign-ins turned off */
       if(!(await store.ensureAuth())){
-        location.href = '/unlock.html?to=' + encodeURIComponent(location.pathname + location.search);
+        $('main').innerHTML = `<div class="empty"><h3>Can't connect</h3>
+          <p>Enable <b>Anonymous sign-ins</b> in Supabase → Authentication → Sign In / Providers, then reload.</p></div>`;
         return;
       }
       const meta = await store.canvasMeta();
