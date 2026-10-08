@@ -12,5 +12,5 @@
    Leave url/anonKey null to run the pages in offline demo mode. */
 window.SUPABASE_CONFIG = {
   url: 'https://mcrbikbarcbssgfuqrot.supabase.co',
-  anonKey: null   // Project Settings → API → "anon public" key
+  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1jcmJpa2JhcmNic3NnZnVxcm90Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE0NDg2MjIsImV4cCI6MjEwNzAyNDYyMn0.-I8uVGyNsOF_4GrpnTkPCejvFqcC1Jyn3NQOY3Uh0ps'
 };
