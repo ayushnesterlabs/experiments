@@ -1,5 +1,13 @@
 # EXPERIMENTS — handoff notes (v1: multi-canvas)
 
+> **Deployment (current):** static frontend on **Vercel** (`vercel.json`, serves
+> `public/`), backend on **Supabase** (Postgres + Storage + Auth + Realtime), wired
+> client-side in `public/app.html` / `index.html` / `unlock.html` via
+> `public/config.js`. See **SUPABASE_SETUP.md** for the one-time setup. The
+> `server.js` SQLite backend below is the original local-dev reference and is no
+> longer what the pages talk to.
+
+
 Zero dependencies, no build step, no framework. Plus Jakarta Sans, white/monochrome, soft shadows.
 
 ```

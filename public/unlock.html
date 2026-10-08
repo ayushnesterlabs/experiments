@@ -57,18 +57,16 @@
   </div>
   <p class="err" id="err"></p>
 </div>
-<script src="/fb-config.js"></script>
+<script src="/config.js"></script>
 <script type="module">
-const V = '10.14.1';
-const G = n => import(`https://www.gstatic.com/firebasejs/${V}/firebase-${n}.js`);
-let fb = null;
-if(window.FIREBASE_CONFIG){
-  const [A, AU, FN] = await Promise.all([G('app'), G('auth'), G('functions')]);
-  const app0 = A.initializeApp(window.FIREBASE_CONFIG);
-  fb = { AU, auth: AU.getAuth(app0), fns: FN.getFunctions(app0), httpsCallable: FN.httpsCallable };
+const SB_CFG = window.SUPABASE_CONFIG || {};
+let sb = null;
+if(SB_CFG.url && SB_CFG.anonKey){
+  const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+  sb = createClient(SB_CFG.url, SB_CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true } });
   /* already unlocked in this browser? go straight through */
-  const user = await new Promise(r => { const off = AU.onAuthStateChanged(fb.auth, u => { off(); r(u); }); });
-  if(user) location.href = new URLSearchParams(location.search).get('to') || '/';
+  const { data } = await sb.auth.getSession();
+  if(data && data.session) location.href = new URLSearchParams(location.search).get('to') || '/';
 }
 
 async function go(){
@@ -76,14 +74,14 @@ async function go(){
   const err = document.getElementById('err');
   if(!key) return;
   try{
-    if(!fb) throw new Error('no config');
-    const unlock = fb.httpsCallable(fb.fns, 'unlock');
-    const res = await unlock({key});
-    await fb.AU.signInWithCustomToken(fb.auth, res.data.token);
+    if(!sb) throw new Error('no config');
+    /* the "team key" is the shared account's password — knowing it == being in */
+    const { error } = await sb.auth.signInWithPassword({ email: SB_CFG.teamEmail, password: key });
+    if(error) throw error;
     location.href = new URLSearchParams(location.search).get('to') || '/';
     return;
   }catch(e){
-    err.textContent = (e && e.code === 'functions/permission-denied')
+    err.textContent = (e && /invalid|credential/i.test(e.message || ''))
       ? 'Not it — ask a teammate for the key.'
       : 'Could not verify the key — try again.';
   }

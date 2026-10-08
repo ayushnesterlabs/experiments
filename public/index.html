@@ -109,7 +109,7 @@
 
 <footer><span>Open to everyone with the link · credit optional · add freely</span><span>v1</span></footer>
 
-<script src="/fb-config.js"></script>
+<script src="/config.js"></script>
 <script type="module">
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ago = ts => {
@@ -120,24 +120,21 @@ const ago = ts => {
   return new Date(ts).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 };
 
-let fb = null;
-if(window.FIREBASE_CONFIG){
-  const V = '10.14.1';
-  const G = n => import(`https://www.gstatic.com/firebasejs/${V}/firebase-${n}.js`);
-  const [A, F, AU] = await Promise.all([G('app'), G('firestore'), G('auth')]);
-  const app0 = A.initializeApp(window.FIREBASE_CONFIG);
-  fb = { F, db: F.getFirestore(app0), auth: AU.getAuth(app0) };
-  /* team-key gate */
-  const user = await new Promise(r => { const off = AU.onAuthStateChanged(fb.auth, u => { off(); r(u); }); });
-  if(!user){ location.href = '/unlock.html?to=%2F'; }
+const SB_CFG = window.SUPABASE_CONFIG || {};
+let sb = null;
+if(SB_CFG.url && SB_CFG.anonKey){
+  const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+  sb = createClient(SB_CFG.url, SB_CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true } });
+  /* team-key gate: no session → bounce to the unlock page */
+  const { data } = await sb.auth.getSession();
+  if(!data || !data.session){ location.href = '/unlock.html?to=%2F'; }
 }
 
 async function loadDirectory(){
-  if(!fb) return;
+  if(!sb) return;
   try{
-    const qs = await fb.F.getDocs(fb.F.query(fb.F.collection(fb.db,'canvases'), fb.F.orderBy('updated','desc')));
-    const all = qs.docs.map(d => ({slug:d.id, ...d.data()}));
-    if(!all.length) return;
+    const { data: all, error } = await sb.from('canvases').select('*').order('updated', { ascending:false });
+    if(error || !all || !all.length) return;
     document.getElementById('recents').style.display='block';
     document.getElementById('recents-list').innerHTML = all.map(c =>
       `<a href="/c/${esc(c.slug)}"><b>${esc(c.name)}</b><span class="meta">${c.designs} designs · ${c.ideas} ideas · active ${ago(c.updated)}</span><span class="arrow">→</span></a>`
@@ -152,7 +149,7 @@ async function create(){
   const name = document.getElementById('name').value.trim();
   const err = document.getElementById('err');
   if(!name){ err.textContent='Give it a name first.'; return; }
-  if(!fb){ err.textContent='Not connected — fb-config.js is missing its Firebase config.'; return; }
+  if(!sb){ err.textContent='Not connected — config.js is missing its Supabase config.'; return; }
   busy = true;
   const btn = document.getElementById('go');
   btn.disabled = true; btn.textContent = 'Creating…';
@@ -160,7 +157,9 @@ async function create(){
   try{
     const base = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'canvas';
     const slug = base + '-' + Math.random().toString(36).slice(2,8);
-    await fb.F.setDoc(fb.F.doc(fb.db,'canvases',slug), {name, created:Date.now(), updated:Date.now(), designs:0, ideas:0});
+    const now = Date.now();
+    const { error } = await sb.from('canvases').insert({ slug, name, created:now, updated:now, designs:0, ideas:0 });
+    if(error) throw error;
     location.href = '/c/'+slug;
   }catch(e){
     err.textContent = 'Could not create the canvas.';

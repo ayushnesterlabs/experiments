@@ -455,7 +455,7 @@
   <button class="cta" id="main-cta" onclick="app.primary()">Upload</button>
 </header>
 
-<div class="banner" id="banner">Demo mode — nothing saves. Fill in <b>fb-config.js</b> and open a canvas from the directory.</div>
+<div class="banner" id="banner">Demo mode — nothing saves. Fill in <b>config.js</b> and open a canvas from the directory.</div>
 
 <datalist id="names-dl"></datalist>
 
@@ -495,7 +495,7 @@
   <div class="drawer-foot" id="drawer-foot"></div>
 </aside>
 
-<script src="/fb-config.js"></script>
+<script src="/config.js"></script>
 <script type="module">
 /* =========================================================
    NAMES — the credit pool. Per-canvas (meta:team item + every
@@ -505,19 +505,17 @@ const DEFAULT_TEAM = ['Ankur','Kunal','Pooja','Abhishek','Sneha','Shrey','Abhiji
 let NAMES = [];
 
 /* =========================================================
-   FIREBASE BOOTSTRAP — dynamic imports so the bare file
+   SUPABASE BOOTSTRAP — dynamic import so the bare file
    (demo mode) never touches the network for the SDK.
 ========================================================= */
 const SLUG = (location.pathname.match(/^\/c\/([a-z0-9-]+)/) || [])[1] || null;
-let fb = null;
-if (window.FIREBASE_CONFIG) {
+const SB_CFG = window.SUPABASE_CONFIG || {};
+let sb = null;
+if (SB_CFG.url && SB_CFG.anonKey) {
   try{
-    const V = '10.14.1';
-    const G = n => import(`https://www.gstatic.com/firebasejs/${V}/firebase-${n}.js`);
-    const [A, F, AU, S] = await Promise.all([G('app'), G('firestore'), G('auth'), G('storage')]);
-    const app0 = A.initializeApp(window.FIREBASE_CONFIG);
-    fb = { F, AU, S, db: F.getFirestore(app0), auth: AU.getAuth(app0), storage: S.getStorage(app0) };
-  }catch(e){ console.error('Firebase failed to load, falling back to demo mode', e); }
+    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+    sb = createClient(SB_CFG.url, SB_CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true } });
+  }catch(e){ console.error('Supabase failed to load, falling back to demo mode', e); }
 }
 
 /* =========================================================
@@ -546,99 +544,133 @@ function applyOp(obj, op){
   return obj;
 }
 const store = (() => {
-  const mode = fb ? 'firebase' : 'demo';
+  const mode = sb ? 'supabase' : 'demo';
   const mem = new Map();
-  const canvasDoc = () => fb.F.doc(fb.db, 'canvases', SLUG);
-  const itemsCol  = () => fb.F.collection(fb.db, 'canvases', SLUG, 'items');
-  const itemDoc   = k  => fb.F.doc(fb.db, 'canvases', SLUG, 'items', k);
   const counterOf = k => k.startsWith('design:') ? 'designs' : k.startsWith('idea:') ? 'ideas' : null;
+  /* bump a canvas counter + touch `updated`. Read-modify-write; counters are
+     cosmetic, so a lost race just means a slightly-off count, never lost data. */
+  async function touchCanvas(incCol){
+    const now = Date.now();
+    if(incCol){
+      const { data } = await sb.from('canvases').select(incCol).eq('slug', SLUG).single();
+      const next = ((data && data[incCol]) || 0) + 1;
+      await sb.from('canvases').update({ updated: now, [incCol]: next }).eq('slug', SLUG);
+    } else {
+      await sb.from('canvases').update({ updated: now }).eq('slug', SLUG);
+    }
+  }
   return {
     mode, slug: SLUG,
     remote: mode !== 'demo',
     /* resolves to the signed-in user, or null → caller redirects to /unlock.html */
-    ensureAuth(){
-      if(mode!=='firebase') return Promise.resolve(true);
-      return new Promise(res => { const off = fb.AU.onAuthStateChanged(fb.auth, u => { off(); res(u); }); });
+    async ensureAuth(){
+      if(mode!=='supabase') return true;
+      const { data } = await sb.auth.getSession();
+      return data && data.session ? data.session.user : null;
     },
     async canvasMeta(){
-      if(mode!=='firebase' || !SLUG) return null;
-      try{ const s = await fb.F.getDoc(canvasDoc()); return s.exists() ? {slug:SLUG, ...s.data()} : null; }catch(e){ return null; }
+      if(mode!=='supabase' || !SLUG) return null;
+      try{
+        const { data } = await sb.from('canvases').select('*').eq('slug', SLUG).maybeSingle();
+        return data || null;
+      }catch(e){ return null; }
     },
     async directory(){
-      if(mode!=='firebase') return [];
-      const qs = await fb.F.getDocs(fb.F.query(fb.F.collection(fb.db,'canvases'), fb.F.orderBy('updated','desc')));
-      return qs.docs.map(d => ({slug:d.id, ...d.data()}));
+      if(mode!=='supabase') return [];
+      const { data } = await sb.from('canvases').select('*').order('updated', { ascending: false });
+      return data || [];
     },
     async createCanvas(name){
       const base = name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'canvas';
       const slug = base + '-' + Math.random().toString(36).slice(2,8);
-      await fb.F.setDoc(fb.F.doc(fb.db,'canvases',slug), {name, created:Date.now(), updated:Date.now(), designs:0, ideas:0});
-      return {slug, name};
+      const now = Date.now();
+      const { error } = await sb.from('canvases').insert({ slug, name, created: now, updated: now, designs: 0, ideas: 0 });
+      if(error){ console.error(error); return null; }
+      return { slug, name };
     },
     /* one round-trip for everything on the canvas: [[key, obj], …] */
     async allItems(){
-      if(mode==='firebase'){
-        const qs = await fb.F.getDocs(itemsCol());
-        return qs.docs.map(d => { try{ return [d.id, JSON.parse(d.data().json)]; }catch(e){ return null; } }).filter(Boolean);
+      if(mode==='supabase'){
+        const { data } = await sb.from('items').select('key, json').eq('canvas', SLUG);
+        return (data || []).map(r => { try{ return [r.key, JSON.parse(r.json)]; }catch(e){ return null; } }).filter(Boolean);
       }
       return [...mem.entries()].map(([k,v]) => [k, JSON.parse(v)]);
     },
     async get(key){
-      if(mode==='firebase'){
-        try{ const s = await fb.F.getDoc(itemDoc(key)); return s.exists() ? JSON.parse(s.data().json) : null; }catch(e){ return null; }
+      if(mode==='supabase'){
+        try{
+          const { data } = await sb.from('items').select('json').eq('canvas', SLUG).eq('key', key).maybeSingle();
+          return data ? JSON.parse(data.json) : null;
+        }catch(e){ return null; }
       }
       return mem.has(key) ? JSON.parse(mem.get(key)) : null;
     },
     async set(key, obj){
-      if(mode==='firebase'){
+      if(mode==='supabase'){
         try{
-          const batch = fb.F.writeBatch(fb.db);
-          batch.set(itemDoc(key), {json: JSON.stringify(obj), ts: Date.now()});
-          const c = counterOf(key);
-          batch.update(canvasDoc(), c ? {updated: Date.now(), [c]: fb.F.increment(1)} : {updated: Date.now()});
-          await batch.commit();
+          const { data: existing } = await sb.from('items').select('key').eq('canvas', SLUG).eq('key', key).maybeSingle();
+          const { error } = await sb.from('items').upsert({ canvas: SLUG, key, json: JSON.stringify(obj), ts: Date.now() });
+          if(error){ console.error(error); return false; }
+          await touchCanvas(existing ? null : counterOf(key));
           return true;
         }catch(e){ console.error(e); return false; }
       }
       mem.set(key, JSON.stringify(obj)); return true;
     },
-    /* Partial write inside a Firestore transaction — two people piling on
-       the same idea at the same moment can't clobber each other. */
+    /* Partial write via optimistic compare-and-swap on `ts`: re-read, apply,
+       and only commit if nobody else wrote in between — so two people piling
+       on the same idea at the same moment can't clobber each other. */
     async mutate(key, op){
-      if(mode==='firebase'){
-        try{
-          await fb.F.runTransaction(fb.db, async tx => {
-            const s = await tx.get(itemDoc(key));
-            if(!s.exists()) throw new Error('missing '+key);
-            const obj = applyOp(JSON.parse(s.data().json), op);
-            tx.set(itemDoc(key), {json: JSON.stringify(obj), ts: Date.now()});
-            tx.update(canvasDoc(), {updated: Date.now()});
-          });
-          return true;
-        }catch(e){ console.error(e); return false; }
+      if(mode==='supabase'){
+        for(let attempt=0; attempt<6; attempt++){
+          const { data: row } = await sb.from('items').select('json, ts').eq('canvas', SLUG).eq('key', key).maybeSingle();
+          if(!row) return false;
+          const obj = applyOp(JSON.parse(row.json), op);
+          const nextTs = Math.max(Date.now(), (row.ts || 0) + 1);   // strictly-increasing so the CAS guard is reliable
+          const { data: upd, error } = await sb.from('items')
+            .update({ json: JSON.stringify(obj), ts: nextTs })
+            .eq('canvas', SLUG).eq('key', key).eq('ts', row.ts)
+            .select('key');
+          if(error){ console.error(error); return false; }
+          if(upd && upd.length){ await touchCanvas(null); return true; }
+          /* lost the race — someone else bumped ts; re-read and retry */
+        }
+        return false;
       }
       const obj = await this.get(key);
       if(!obj) return false;
       return this.set(key, applyOp(obj, op));
     },
-    /* dataURL → Storage URL (demo mode keeps the dataURL as-is) */
+    /* dataURL → Storage public URL (demo mode keeps the dataURL as-is) */
     async uploadImage(dataUrl){
-      if(mode!=='firebase') return dataUrl;
-      const id = Date.now() + '-' + Math.random().toString(36).slice(2,8);
-      const r = fb.S.ref(fb.storage, `canvases/${SLUG}/img/${id}`);
-      await fb.S.uploadString(r, dataUrl, 'data_url');
-      return await fb.S.getDownloadURL(r);
+      if(mode!=='supabase') return dataUrl;
+      try{
+        const blob = await (await fetch(dataUrl)).blob();
+        const ext = (blob.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi,'');
+        const path = `${SLUG}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+        const { error } = await sb.storage.from('images').upload(path, blob, { contentType: blob.type, upsert: false });
+        if(error){ console.error(error); return dataUrl; }
+        return sb.storage.from('images').getPublicUrl(path).data.publicUrl;
+      }catch(e){ console.error(e); return dataUrl; }
     },
-    /* live sync: onChange(key, obj) per changed item, onBatch() after each snapshot */
-    subscribe(onChange, onBatch){
-      if(mode!=='firebase' || !SLUG) return;
-      fb.F.onSnapshot(itemsCol(), snap => {
-        snap.docChanges().forEach(ch => {
-          if(ch.type==='removed') return;
-          try{ onChange(ch.doc.id, JSON.parse(ch.doc.data().json)); }catch(e){}
-        });
-        if(onBatch) onBatch();
-      });
+    /* live sync. Emulates Firestore's "first snapshot = full load": we fetch
+       everything once (onBatch resolves the initial load), then stream changes
+       via Postgres realtime. onChange(key, obj) per item, onBatch() after each. */
+    async subscribe(onChange, onBatch){
+      if(mode!=='supabase' || !SLUG) return;
+      const items = await this.allItems();
+      items.forEach(([k,v]) => onChange(k, v));
+      if(onBatch) onBatch();
+      sb.channel('items-'+SLUG)
+        .on('postgres_changes',
+            { event: '*', schema: 'public', table: 'items', filter: `canvas=eq.${SLUG}` },
+            payload => {
+              const r = payload.new;
+              if(!r || !r.key) return;
+              try{ onChange(r.key, JSON.parse(r.json)); }catch(e){}
+              if(onBatch) onBatch();
+            })
+        .subscribe();
     },
     seedDemo(){ demoData().forEach(([k,v]) => mem.set(k, JSON.stringify(v))); }
   };
@@ -1274,7 +1306,7 @@ const app = (() => {
     const author = ($('up-author')?.value)||'';
     let data=null, extra={};
     if(upKind==='image'){ data=pendingImage; if(!data){err.textContent='Add an image first.';return;} }
-    const protoCap = store.mode==='firebase' ? 9e5 : 3.5e6;
+    const protoCap = store.remote ? 9e5 : 3.5e6;
     if(upKind==='proto'){ data=($('up-code').value||'').trim(); if(!data){err.textContent='Upload or paste some HTML first.';return;} if(data.length>protoCap){err.textContent=`Too large (max ${Math.round(protoCap/1e3)}KB) — host it and share the repo or a link instead.`;return;} }
     if(upKind==='repo'){
       data=($('up-repo').value||'').trim();
@@ -1325,7 +1357,7 @@ const app = (() => {
   }
   document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeDrawer(); closeSide(); if(composer||newSpot){ composer=null; newSpot=null; if(view==='ideas') renderIdeas(); } } });
 
-  /* ---------- live sync (Firestore snapshots) ---------- */
+  /* ---------- live sync (Supabase realtime) ---------- */
   let dirty = false;
   /* re-render unless the user is mid-composition / mid-drag / in the drawer;
      then it happens as soon as they're done */
@@ -1411,7 +1443,7 @@ const app = (() => {
   }
   /* ---------- boot ---------- */
   (async function boot(){
-    if(store.mode==='firebase'){
+    if(store.remote){
       /* team-key gate: no auth → the unlock page signs in and sends them back */
       if(!(await store.ensureAuth())){
         location.href = '/unlock.html?to=' + encodeURIComponent(location.pathname + location.search);
